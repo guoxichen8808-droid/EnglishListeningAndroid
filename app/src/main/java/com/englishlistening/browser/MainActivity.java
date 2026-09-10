@@ -31,6 +31,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.Toast;
@@ -44,7 +45,6 @@ import java.util.Date;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
-    private static final String HOME_URL = "file:///android_asset/home.html";
     private static final int STORAGE_PERMISSION_CODE = 701;
     private static final int FILE_CHOOSER_CODE = 702;
 
@@ -59,6 +59,10 @@ public class MainActivity extends Activity {
     private AppData data;
     private AudioPlayerDialog audioPlayer;
     private AiPracticeHelper aiPractice;
+    private UltimateTools tools;
+    private long sessionStarted;
+    private View customView;
+    private WebChromeClient.CustomViewCallback customViewCallback;
 
     private static class PendingDownload {
         String url, userAgent, contentDisposition, mimeType;
@@ -81,8 +85,12 @@ public class MainActivity extends Activity {
         buildUi();
         configureWebView();
         audioPlayer = new AudioPlayerDialog(this);
-        aiPractice = new AiPracticeHelper(this, webView);
-        if (savedInstanceState == null || webView.restoreState(savedInstanceState) == null) loadHome();
+        aiPractice = new AiPracticeHelper(this, webView, data);
+        tools = new UltimateTools(this, webView, data, aiPractice);
+        if (savedInstanceState == null || webView.restoreState(savedInstanceState) == null) {
+            if (data.autoResume() && AppData.isHttp(data.lastLearningUrl())) webView.loadUrl(data.lastLearningUrl());
+            else loadHome();
+        }
     }
 
     private void buildUi() {
@@ -127,7 +135,7 @@ public class MainActivity extends Activity {
         browserNav.setOrientation(LinearLayout.HORIZONTAL);
         browserNav.setGravity(Gravity.CENTER);
         browserNav.setBackgroundColor(Color.rgb(245, 246, 248));
-        String[] navNames = {"←", "→", "刷新", "☆ 收藏", "历史"};
+        String[] navNames = {"←", "→", "刷新", "☆ 收藏", "页内查找"};
         Button[] nav = new Button[navNames.length];
         for (int i = 0; i < navNames.length; i++) {
             nav[i] = makeButton(navNames[i], 12);
@@ -139,14 +147,14 @@ public class MainActivity extends Activity {
         nav[1].setOnClickListener(v -> { if (webView.canGoForward()) webView.goForward(); });
         nav[2].setOnClickListener(v -> webView.reload());
         nav[3].setOnClickListener(v -> addCurrentFavorite());
-        nav[4].setOnClickListener(v -> showHistory("") );
+        nav[4].setOnClickListener(v -> tools.findInPage());
         root.addView(browserNav, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)));
 
         LinearLayout mainNav = new LinearLayout(this);
         mainNav.setOrientation(LinearLayout.HORIZONTAL);
         mainNav.setGravity(Gravity.CENTER);
         mainNav.setBackgroundColor(Color.rgb(248, 249, 251));
-        String[] mainNames = {"首页", "浏览", "收藏", "下载", "AI练习"};
+        String[] mainNames = {"首页", "继续", "收藏", "下载", "训练"};
         Button[] main = new Button[mainNames.length];
         for (int i = 0; i < mainNames.length; i++) {
             main[i] = makeButton(mainNames[i], 12);
@@ -158,7 +166,6 @@ public class MainActivity extends Activity {
         main[3].setOnClickListener(v -> showDownloads());
         main[4].setOnClickListener(v -> aiPractice.openFromCurrentPage());
         root.addView(mainNav, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58)));
-
         setContentView(root);
     }
 
@@ -188,6 +195,7 @@ public class MainActivity extends Activity {
         s.setLoadWithOverviewMode(true);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
         s.setJavaScriptCanOpenWindowsAutomatically(true);
+        s.setSupportMultipleWindows(false);
 
         CookieManager cm = CookieManager.getInstance();
         cm.setAcceptCookie(true);
@@ -205,7 +213,8 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
-                addressBar.setText(HOME_URL.equals(url) ? "" : url);
+                boolean local = url != null && url.startsWith("file:///android_asset/");
+                addressBar.setText(local ? "" : url);
                 if (AppData.isHttp(url) && !AppData.isAiUrl(url)) {
                     data.addHistory(url, view.getTitle());
                     data.setLastLearning(url, view.getTitle());
@@ -242,6 +251,19 @@ public class MainActivity extends Activity {
                     return false;
                 }
             }
+
+            @Override
+            public void onShowCustomView(View view, CustomViewCallback callback) {
+                if (customView != null) { callback.onCustomViewHidden(); return; }
+                customView = view;
+                customViewCallback = callback;
+                FrameLayout decor = (FrameLayout) getWindow().getDecorView();
+                decor.addView(view, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+            }
+
+            @Override
+            public void onHideCustomView() { hideCustomView(); }
         });
 
         webView.setDownloadListener(new DownloadListener() {
@@ -267,14 +289,29 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void hideCustomView() {
+        if (customView == null) return;
+        FrameLayout decor = (FrameLayout) getWindow().getDecorView();
+        decor.removeView(customView);
+        customView = null;
+        getWindow().getDecorView().setSystemUiVisibility(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR : View.SYSTEM_UI_FLAG_VISIBLE);
+        if (customViewCallback != null) customViewCallback.onCustomViewHidden();
+        customViewCallback = null;
+    }
+
     private boolean handleSpecialUrl(String url) {
         if (url == null) return false;
         if (url.startsWith("app://")) {
             if (url.equals("app://continue")) continueLastLearning();
-            else if (url.equals("app://ai")) aiPractice.openFromCurrentPage();
+            else if (url.equals("app://studio") || url.equals("app://ai")) aiPractice.openFromCurrentPage();
+            else if (url.equals("app://materials")) tools.showMaterials();
             else if (url.equals("app://favorites")) showFavorites();
             else if (url.equals("app://downloads")) showDownloads();
             else if (url.equals("app://history")) showHistory("");
+            else if (url.equals("app://stats")) tools.showStats();
+            else if (url.equals("app://shortcuts")) tools.showShortcuts();
+            else if (url.equals("app://backup")) tools.showBackupActions();
+            else if (url.equals("app://settings")) tools.showSettings();
             return true;
         }
         if (AppData.isHttp(url) || url.startsWith("file:///android_asset/")) return false;
@@ -298,7 +335,10 @@ public class MainActivity extends Activity {
         webView.requestFocus();
     }
 
-    private void loadHome() { webView.loadUrl(HOME_URL); }
+    private void loadHome() {
+        String html = HomePageBuilder.build(data);
+        webView.loadDataWithBaseURL("file:///android_asset/", html, "text/html", "UTF-8", null);
+    }
 
     private void continueLastLearning() {
         String url = data.lastLearningUrl();
@@ -325,28 +365,26 @@ public class MainActivity extends Activity {
             Toast.makeText(this, q.isEmpty() ? "还没有浏览记录" : "没有匹配的历史记录", Toast.LENGTH_SHORT).show();
             return;
         }
-
         LinearLayout searchBox = new LinearLayout(this);
         searchBox.setPadding(dp(18), 0, dp(18), 0);
         EditText search = new EditText(this);
         search.setSingleLine(true);
         search.setHint("搜索历史，例如 ceiling / BBC");
+        search.setText(query == null ? "" : query);
         searchBox.addView(search, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46)));
-
         String[] labels = new String[matches.size()];
         SimpleDateFormat fmt = new SimpleDateFormat("MM-dd HH:mm", Locale.getDefault());
         for (int i = 0; i < matches.size(); i++) {
             JSONObject o = matches.get(i);
-            labels[i] = AppData.ellipsize(o.optString("title", o.optString("url")), 42) + "\n" + fmt.format(new Date(o.optLong("time", 0))) + "  " + AppData.compactHost(o.optString("url"));
+            labels[i] = AppData.ellipsize(o.optString("title", o.optString("url")), 40) + "\n" + fmt.format(new Date(o.optLong("time", 0))) + " · " + o.optInt("visits", 1) + "次 · " + AppData.compactHost(o.optString("url"));
         }
         AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle(q.isEmpty() ? "浏览历史" : "历史搜索：" + query)
                 .setView(searchBox)
                 .setItems(labels, (d, which) -> webView.loadUrl(matches.get(which).optString("url")))
                 .setPositiveButton("搜索", null)
-                .setNeutralButton("清空", (d, w) -> confirmClearHistory())
-                .setNegativeButton("关闭", null)
-                .create();
+                .setNeutralButton("清空", (d,w) -> confirmClearHistory())
+                .setNegativeButton("关闭", null).create();
         dialog.setOnShowListener(x -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
             String next = search.getText().toString().trim();
             dialog.dismiss();
@@ -356,82 +394,53 @@ public class MainActivity extends Activity {
     }
 
     private void confirmClearHistory() {
-        new AlertDialog.Builder(this)
-                .setTitle("清空浏览历史？")
-                .setMessage("收藏和已下载文件不会删除。")
-                .setPositiveButton("清空", (d, w) -> {
-                    data.clearHistory();
-                    webView.clearHistory();
-                    Toast.makeText(this, "历史已清空", Toast.LENGTH_SHORT).show();
-                })
-                .setNegativeButton("取消", null)
-                .show();
+        new AlertDialog.Builder(this).setTitle("清空浏览历史？")
+                .setMessage("收藏、素材库和已下载文件不会删除。")
+                .setPositiveButton("清空", (d,w) -> {
+                    data.clearHistory(); webView.clearHistory(); Toast.makeText(this, "历史已清空", Toast.LENGTH_SHORT).show();
+                }).setNegativeButton("取消", null).show();
     }
 
     private void addCurrentFavorite() {
         String url = webView.getUrl();
         if (!AppData.isHttp(url) || AppData.isAiUrl(url)) {
-            Toast.makeText(this, "当前页面不能加入学习收藏", Toast.LENGTH_SHORT).show();
-            return;
+            Toast.makeText(this, "当前页面不能加入学习收藏", Toast.LENGTH_SHORT).show(); return;
         }
-        if (data.isFavorite(url)) {
-            Toast.makeText(this, "这个页面已经收藏过了", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        EditText note = new EditText(this);
-        note.setHint("可选备注：例如 重点练连读");
-        new AlertDialog.Builder(this)
-                .setTitle("收藏当前内容")
-                .setMessage(AppData.safeTitle(webView.getTitle(), url))
-                .setView(note)
-                .setPositiveButton("收藏", (d, w) -> {
-                    data.addFavorite(url, webView.getTitle(), note.getText().toString());
-                    Toast.makeText(this, "已加入收藏", Toast.LENGTH_SHORT).show();
-                })
-                .setNegativeButton("取消", null)
-                .show();
+        if (data.isFavorite(url)) { Toast.makeText(this, "这个页面已经收藏过了", Toast.LENGTH_SHORT).show(); return; }
+        EditText note = new EditText(this); note.setHint("可选备注：例如 重点练连读");
+        new AlertDialog.Builder(this).setTitle("收藏当前内容")
+                .setMessage(AppData.safeTitle(webView.getTitle(), url)).setView(note)
+                .setPositiveButton("收藏", (d,w) -> { data.addFavorite(url, webView.getTitle(), note.getText().toString()); Toast.makeText(this, "已加入收藏", Toast.LENGTH_SHORT).show(); })
+                .setNeutralButton("收藏并训练", (d,w) -> { data.addFavorite(url, webView.getTitle(), note.getText().toString()); aiPractice.openFromCurrentPage(); })
+                .setNegativeButton("取消", null).show();
     }
 
     private void showFavorites() {
         JSONArray arr = data.favorites();
-        if (arr.length() == 0) {
-            Toast.makeText(this, "还没有收藏。浏览网页后点“☆ 收藏”。", Toast.LENGTH_LONG).show();
-            return;
-        }
+        if (arr.length() == 0) { Toast.makeText(this, "还没有收藏。浏览网页后点“☆ 收藏”。", Toast.LENGTH_LONG).show(); return; }
         String[] labels = new String[arr.length()];
         for (int i = 0; i < arr.length(); i++) {
             JSONObject o = arr.optJSONObject(i);
-            String title = o == null ? "" : AppData.ellipsize(o.optString("title", o.optString("url")), 42);
+            String title = o == null ? "" : AppData.ellipsize(o.optString("title", o.optString("url")), 40);
             String note = o == null ? "" : o.optString("note", "");
-            labels[i] = title + (note.isEmpty() ? "" : "\n备注：" + AppData.ellipsize(note, 36));
+            labels[i] = title + (note.isEmpty() ? "" : "\n备注：" + AppData.ellipsize(note, 34));
         }
-        new AlertDialog.Builder(this)
-                .setTitle("我的收藏")
-                .setItems(labels, (d, which) -> {
-                    JSONObject o = arr.optJSONObject(which);
-                    if (o != null) webView.loadUrl(o.optString("url"));
-                })
-                .setNeutralButton("删除收藏", (d, w) -> showFavoriteManager())
-                .setNegativeButton("关闭", null)
-                .show();
+        new AlertDialog.Builder(this).setTitle("我的收藏 · " + arr.length() + " 条")
+                .setItems(labels, (d, which) -> showFavoriteActions(arr.optJSONObject(which), which))
+                .setNegativeButton("关闭", null).show();
     }
 
-    private void showFavoriteManager() {
-        JSONArray arr = data.favorites();
-        if (arr.length() == 0) return;
-        String[] labels = new String[arr.length()];
-        for (int i = 0; i < arr.length(); i++) {
-            JSONObject o = arr.optJSONObject(i);
-            labels[i] = "删除：" + (o == null ? "" : AppData.ellipsize(o.optString("title", o.optString("url")), 38));
-        }
-        new AlertDialog.Builder(this)
-                .setTitle("删除收藏")
-                .setItems(labels, (d, which) -> {
-                    data.removeFavorite(which);
-                    Toast.makeText(this, "收藏已删除", Toast.LENGTH_SHORT).show();
-                })
-                .setNegativeButton("取消", null)
-                .show();
+    private void showFavoriteActions(JSONObject item, int index) {
+        if (item == null) return;
+        String[] actions = {"打开网页", "直接训练", "加入首页快捷入口", "删除收藏"};
+        new AlertDialog.Builder(this).setTitle(AppData.ellipsize(item.optString("title"), 50))
+                .setItems(actions, (d, which) -> {
+                    String url = item.optString("url");
+                    if (which == 0) webView.loadUrl(url);
+                    else if (which == 1) { webView.loadUrl(url); Toast.makeText(this, "网页加载后点底部“训练”", Toast.LENGTH_LONG).show(); }
+                    else if (which == 2) { if (data.addShortcut(item.optString("title"), url)) Toast.makeText(this, "已加入首页", Toast.LENGTH_SHORT).show(); else Toast.makeText(this, "已存在或首页入口已满", Toast.LENGTH_SHORT).show(); }
+                    else { data.removeFavorite(index); Toast.makeText(this, "收藏已删除", Toast.LENGTH_SHORT).show(); }
+                }).setNegativeButton("返回", null).show();
     }
 
     private void showLinkMenu(String url) {
@@ -464,7 +473,7 @@ public class MainActivity extends Activity {
             String fileName = sanitizeFileName(URLUtil.guessFileName(d.url, d.contentDisposition, d.mimeType));
             DownloadManager.Request request = new DownloadManager.Request(Uri.parse(d.url));
             request.setTitle(fileName);
-            request.setDescription("英语听力 APP 下载");
+            request.setDescription("EnglishListening Ultimate 下载");
             request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
             request.setAllowedOverMetered(true);
             request.setAllowedOverRoaming(false);
@@ -486,30 +495,22 @@ public class MainActivity extends Activity {
     private void showDownloads() {
         JSONArray arr = data.downloads();
         if (arr.length() == 0) {
-            new AlertDialog.Builder(this)
-                    .setTitle("下载")
+            new AlertDialog.Builder(this).setTitle("下载")
                     .setMessage("还没有 APP 下载记录。\n文件默认保存在 Downloads/EnglishListening/")
-                    .setPositiveButton("系统下载", (d, w) -> openSystemDownloads())
-                    .setNegativeButton("关闭", null)
-                    .show();
+                    .setPositiveButton("系统下载", (d,w) -> openSystemDownloads()).setNegativeButton("关闭", null).show();
             return;
         }
         String[] labels = new String[arr.length()];
         SimpleDateFormat fmt = new SimpleDateFormat("MM-dd HH:mm", Locale.getDefault());
         for (int i = 0; i < arr.length(); i++) {
             JSONObject o = arr.optJSONObject(i);
-            labels[i] = (o == null ? "" : AppData.ellipsize(o.optString("name"), 42)) + "\n" + (o == null ? "" : fmt.format(new Date(o.optLong("time", 0))));
+            labels[i] = (o == null ? "" : AppData.ellipsize(o.optString("name"), 40)) + "\n" + (o == null ? "" : fmt.format(new Date(o.optLong("time", 0))));
         }
-        new AlertDialog.Builder(this)
-                .setTitle("下载记录")
+        new AlertDialog.Builder(this).setTitle("下载记录 · " + arr.length() + " 条")
                 .setItems(labels, (d, which) -> showDownloadActions(arr.optJSONObject(which)))
-                .setPositiveButton("系统下载", (d, w) -> openSystemDownloads())
-                .setNeutralButton("清记录", (d, w) -> {
-                    data.clearDownloadsList();
-                    Toast.makeText(this, "只清除了记录，文件没有删除", Toast.LENGTH_LONG).show();
-                })
-                .setNegativeButton("关闭", null)
-                .show();
+                .setPositiveButton("系统下载", (d,w) -> openSystemDownloads())
+                .setNeutralButton("清记录", (d,w) -> { data.clearDownloadsList(); Toast.makeText(this, "只清除记录，文件没有删除", Toast.LENGTH_LONG).show(); })
+                .setNegativeButton("关闭", null).show();
     }
 
     private void showDownloadActions(JSONObject item) {
@@ -532,22 +533,14 @@ public class MainActivity extends Activity {
     private void openDownloaded(long id, String mime, boolean playAudio) {
         DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
         Uri uri = dm.getUriForDownloadedFile(id);
-        if (uri == null) {
-            Toast.makeText(this, "文件可能未完成或已被删除", Toast.LENGTH_LONG).show();
-            return;
-        }
-        if (playAudio) {
-            audioPlayer.show(uri.toString(), "已下载音频");
-            return;
-        }
+        if (uri == null) { Toast.makeText(this, "文件可能未完成或已被删除", Toast.LENGTH_LONG).show(); return; }
+        if (playAudio) { audioPlayer.show(uri.toString(), "已下载音频"); return; }
         try {
             Intent intent = new Intent(Intent.ACTION_VIEW);
             intent.setDataAndType(uri, mime == null || mime.isEmpty() ? "*/*" : mime);
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivity(intent);
-        } catch (Exception e) {
-            Toast.makeText(this, "没有可打开该文件的应用", Toast.LENGTH_SHORT).show();
-        }
+        } catch (Exception e) { Toast.makeText(this, "没有可打开该文件的应用", Toast.LENGTH_SHORT).show(); }
     }
 
     private void openSystemDownloads() {
@@ -559,19 +552,26 @@ public class MainActivity extends Activity {
     }
 
     private void showMoreMenu() {
-        String[] items = {"刷新当前页", "收藏当前页", "AI练习当前页", "系统浏览器打开", "复制当前网址", "夜间阅读切换", "清除网页缓存"};
-        new AlertDialog.Builder(this).setTitle("更多").setItems(items, (d, which) -> {
+        String[] items = {"训练当前网页", "保存网页文字到素材库", "纯文本阅读", "收藏当前页", "加入首页快捷入口", "网页内查找", "切换电脑/手机网页", "分享当前网页", "系统浏览器打开", "复制当前网址", "夜间阅读切换", "素材库", "学习统计", "备份与恢复", "设置", "停止音频播放", "清除网页缓存"};
+        new AlertDialog.Builder(this).setTitle("终极工具箱").setItems(items, (d, which) -> {
             String current = webView.getUrl();
-            if (which == 0) webView.reload();
-            else if (which == 1) addCurrentFavorite();
-            else if (which == 2) aiPractice.openFromCurrentPage();
-            else if (which == 3 && AppData.isHttp(current)) openExternal(current);
-            else if (which == 4 && current != null) copy(current, "网址");
-            else if (which == 5) toggleNightReading();
-            else if (which == 6) {
-                webView.clearCache(true);
-                Toast.makeText(this, "网页缓存已清除", Toast.LENGTH_SHORT).show();
-            }
+            if (which == 0) aiPractice.openFromCurrentPage();
+            else if (which == 1) aiPractice.saveCurrentPageToLibrary();
+            else if (which == 2) tools.showReaderMode();
+            else if (which == 3) addCurrentFavorite();
+            else if (which == 4) tools.addCurrentShortcut();
+            else if (which == 5) tools.findInPage();
+            else if (which == 6) tools.toggleDesktopMode();
+            else if (which == 7) tools.shareCurrentPage();
+            else if (which == 8 && AppData.isHttp(current)) openExternal(current);
+            else if (which == 9 && current != null) copy(current, "网址");
+            else if (which == 10) toggleNightReading();
+            else if (which == 11) tools.showMaterials();
+            else if (which == 12) tools.showStats();
+            else if (which == 13) tools.showBackupActions();
+            else if (which == 14) tools.showSettings();
+            else if (which == 15) { audioPlayer.stop(); Toast.makeText(this, "音频播放已停止", Toast.LENGTH_SHORT).show(); }
+            else if (which == 16) { webView.clearCache(true); Toast.makeText(this, "网页缓存已清除", Toast.LENGTH_SHORT).show(); }
         }).show();
     }
 
@@ -597,16 +597,13 @@ public class MainActivity extends Activity {
         return name.length() > 120 ? name.substring(0, 120) : name;
     }
 
-    private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
-    }
+    private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == STORAGE_PERMISSION_CODE && pendingDownload != null) {
-            PendingDownload d = pendingDownload;
-            pendingDownload = null;
+            PendingDownload d = pendingDownload; pendingDownload = null;
             if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) enqueueDownload(d);
             else Toast.makeText(this, "Android 8/9 需要存储权限才能保存文件", Toast.LENGTH_LONG).show();
         }
@@ -615,18 +612,17 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent intent) {
         super.onActivityResult(requestCode, resultCode, intent);
+        if (tools != null && tools.handleActivityResult(requestCode, resultCode, intent)) { loadHome(); return; }
         if (requestCode == FILE_CHOOSER_CODE) {
             if (filePathCallback != null) {
                 Uri[] results = null;
                 if (resultCode == RESULT_OK && intent != null) {
                     if (intent.getClipData() != null) {
-                        int count = intent.getClipData().getItemCount();
-                        results = new Uri[count];
+                        int count = intent.getClipData().getItemCount(); results = new Uri[count];
                         for (int i = 0; i < count; i++) results[i] = intent.getClipData().getItemAt(i).getUri();
                     } else if (intent.getData() != null) results = new Uri[]{intent.getData()};
                 }
-                filePathCallback.onReceiveValue(results);
-                filePathCallback = null;
+                filePathCallback.onReceiveValue(results); filePathCallback = null;
             }
         } else if (requestCode == AiPracticeHelper.SPEECH_REQUEST && resultCode == RESULT_OK) {
             aiPractice.handleSpeechResult(intent);
@@ -634,17 +630,30 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume(); sessionStarted = System.currentTimeMillis();
+    }
+
+    @Override
+    protected void onPause() {
+        if (sessionStarted > 0) {
+            long seconds = (System.currentTimeMillis() - sessionStarted) / 1000L;
+            if (seconds >= 5) data.addStudySeconds(Math.min(seconds, 4 * 60 * 60));
+            sessionStarted = 0;
+        }
+        CookieManager.getInstance().flush();
+        super.onPause();
+    }
+
+    @Override
     protected void onSaveInstanceState(Bundle outState) {
-        webView.saveState(outState);
-        super.onSaveInstanceState(outState);
+        webView.saveState(outState); super.onSaveInstanceState(outState);
     }
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if (keyCode == KeyEvent.KEYCODE_BACK && webView.canGoBack()) {
-            webView.goBack();
-            return true;
-        }
+        if (keyCode == KeyEvent.KEYCODE_BACK && customView != null) { hideCustomView(); return true; }
+        if (keyCode == KeyEvent.KEYCODE_BACK && webView.canGoBack()) { webView.goBack(); return true; }
         return super.onKeyDown(keyCode, event);
     }
 
@@ -652,10 +661,7 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         if (aiPractice != null) aiPractice.destroy();
         if (audioPlayer != null) audioPlayer.stop();
-        if (webView != null) {
-            webView.stopLoading();
-            webView.destroy();
-        }
+        if (webView != null) { webView.stopLoading(); webView.destroy(); }
         super.onDestroy();
     }
 }
