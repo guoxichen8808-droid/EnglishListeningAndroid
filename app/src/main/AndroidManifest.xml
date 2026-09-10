@@ -15,6 +15,10 @@
         <activity android:name=".TtsRepairActivity" android:exported="false" />
         <activity android:name=".MainActivity" android:exported="false" />
         <activity
+            android:name=".AiTutorActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
             android:name=".PracticalMainActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|keyboardHidden">
