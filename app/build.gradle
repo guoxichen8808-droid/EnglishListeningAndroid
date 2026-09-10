@@ -11,8 +11,8 @@ android {
         applicationId 'com.englishlistening.browser'
         minSdk 26
         targetSdk 35
-        versionCode 11
-        versionName 'Practical-1.6'
+        versionCode 12
+        versionName 'Practical-1.7'
     }
 
     buildTypes {
@@ -33,4 +33,5 @@ android {
 dependencies {
     implementation 'dev.ffmpegkit-maintained:whisper-android:1.0.0'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
 }
