@@ -11,8 +11,8 @@ android {
         applicationId 'com.englishlistening.browser'
         minSdk 26
         targetSdk 35
-        versionCode 9
-        versionName 'Practical-1.4'
+        versionCode 10
+        versionName 'Practical-1.5'
     }
 
     buildTypes {
