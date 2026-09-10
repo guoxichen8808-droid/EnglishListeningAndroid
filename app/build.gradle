@@ -1,5 +1,6 @@
 plugins {
     id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
 }
 
 android {
@@ -10,8 +11,8 @@ android {
         applicationId 'com.englishlistening.browser'
         minSdk 26
         targetSdk 35
-        versionCode 6
-        versionName 'Practical-1.1'
+        versionCode 7
+        versionName 'Practical-1.2'
     }
 
     buildTypes {
@@ -24,4 +25,12 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+dependencies {
+    implementation 'dev.ffmpegkit-maintained:whisper-android:1.0.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0'
 }
