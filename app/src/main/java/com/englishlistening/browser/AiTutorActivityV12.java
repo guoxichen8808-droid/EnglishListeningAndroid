@@ -7,6 +7,7 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.net.Uri;
@@ -24,13 +25,22 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.File;
+
 public class AiTutorActivityV12 extends Activity {
     private static final int MIC_PERMISSION = 1301;
+    private static final String SPEECH_PREFS = "speech_provider";
+    private static final String KEY_SPEECH_PROVIDER = "provider";
+    private static final String PROVIDER_GEMINI = "gemini";
+    private static final String PROVIDER_WHISPER = "whisper";
 
     private AppData data;
     private SecureApiKeyStore keyStore;
     private GeminiClient client;
+    private GeminiTranscriptionClient transcriptionClient;
     private OfflineWhisperManager whisper;
+    private VoiceRecorder voiceRecorder;
+    private SharedPreferences speechPrefs;
 
     private String currentMaterial = "";
     private String currentTitle = "学习素材";
@@ -48,90 +58,389 @@ public class AiTutorActivityV12 extends Activity {
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
 
-        data=new AppData(this); keyStore=new SecureApiKeyStore(this); client=new GeminiClient(keyStore); whisper=new OfflineWhisperManager(this);
-        Intent i=getIntent(); currentMaterial=safe(i.getStringExtra("material")); currentTitle=safe(i.getStringExtra("title")); currentUrl=safe(i.getStringExtra("url"));
-        if(currentTitle.trim().isEmpty()) currentTitle="学习素材";
-        buildUi(); renderMaterialPreview();
-        if(!keyStore.hasKey()) resultView.setText("未配置在线 AI。右上角 ⋮ → AI设置。\n离线语音识别可独立使用。");
-        else resultView.setText("");
+        data = new AppData(this);
+        keyStore = new SecureApiKeyStore(this);
+        client = new GeminiClient(keyStore);
+        transcriptionClient = new GeminiTranscriptionClient(keyStore);
+        whisper = new OfflineWhisperManager(this);
+        voiceRecorder = new VoiceRecorder(this);
+        speechPrefs = getSharedPreferences(SPEECH_PREFS, Context.MODE_PRIVATE);
+
+        Intent i = getIntent();
+        currentMaterial = safe(i.getStringExtra("material"));
+        currentTitle = safe(i.getStringExtra("title"));
+        currentUrl = safe(i.getStringExtra("url"));
+        if (currentTitle.trim().isEmpty()) currentTitle = "学习素材";
+
+        buildUi();
+        renderMaterialPreview();
+        if (!keyStore.hasKey()) {
+            resultView.setText("还没有配置 Gemini Key。右上角 ⋮ → AI设置。\n\n语音识别默认使用 Gemini 3.5 Transcribe；也可以在语音识别设置里切回离线 Whisper。");
+        } else {
+            resultView.setText("");
+        }
     }
 
-    private void buildUi(){
-        LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setBackgroundColor(Color.WHITE);
-        LinearLayout top=new LinearLayout(this);top.setGravity(Gravity.CENTER_VERTICAL);top.setPadding(dp(6),dp(4),dp(6),dp(4));top.setBackgroundColor(Color.rgb(247,248,250));
-        Button back=button("←",22);back.setOnClickListener(v->finish());top.addView(back,new LinearLayout.LayoutParams(dp(50),dp(46)));
-        TextView title=new TextView(this);title.setText("AI老师");title.setTextSize(20);title.setGravity(Gravity.CENTER_VERTICAL);title.setPadding(dp(8),0,0,0);top.addView(title,new LinearLayout.LayoutParams(0,dp(46),1f));
-        Button more=button("⋮",24);more.setOnClickListener(this::showMoreMenu);top.addView(more,new LinearLayout.LayoutParams(dp(50),dp(46)));root.addView(top,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,dp(54)));
+    private void buildUi() {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(Color.WHITE);
 
-        materialPreview=new TextView(this);materialPreview.setTextSize(13);materialPreview.setTextColor(Color.rgb(71,84,103));materialPreview.setBackgroundColor(Color.rgb(248,250,252));materialPreview.setPadding(dp(14),dp(9),dp(14),dp(9));materialPreview.setMaxLines(2);materialPreview.setOnClickListener(v->editMaterial());root.addView(materialPreview);
+        LinearLayout top = new LinearLayout(this);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        top.setPadding(dp(6),dp(4),dp(6),dp(4));
+        top.setBackgroundColor(Color.rgb(247,248,250));
 
-        LinearLayout quick=new LinearLayout(this);quick.setPadding(dp(8),dp(6),dp(8),dp(6));String[] n={"听力分析","高频表达","出一道题"};String[] t={"listening","phrases","quiz"};
-        for(int x=0;x<n.length;x++){Button b=button(n[x],12);final String task=t[x];b.setOnClickListener(v->runTask(task));quick.addView(b,new LinearLayout.LayoutParams(0,dp(44),1f));}root.addView(quick,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,dp(56)));
+        Button back = button("←",22);
+        back.setOnClickListener(v -> finish());
+        top.addView(back,new LinearLayout.LayoutParams(dp(50),dp(46)));
 
-        resultView=new TextView(this);resultView.setTextSize(16);resultView.setTextColor(Color.rgb(17,24,39));resultView.setTextIsSelectable(true);resultView.setLineSpacing(0,1.18f);resultView.setPadding(dp(16),dp(14),dp(16),dp(18));
-        ScrollView scroll=new ScrollView(this);scroll.setFillViewport(true);scroll.addView(resultView,new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT));root.addView(scroll,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,0,1f));
+        TextView title = new TextView(this);
+        title.setText("AI老师");
+        title.setTextSize(20);
+        title.setGravity(Gravity.CENTER_VERTICAL);
+        title.setPadding(dp(8),0,0,0);
+        top.addView(title,new LinearLayout.LayoutParams(0,dp(46),1f));
 
-        LinearLayout composer=new LinearLayout(this);composer.setGravity(Gravity.CENTER_VERTICAL);composer.setPadding(dp(8),dp(6),dp(8),dp(8));composer.setBackgroundColor(Color.rgb(247,248,250));
-        answerBox=new EditText(this);answerBox.setHint("输入回答，或点麦克风录英语");answerBox.setTextSize(15);answerBox.setMaxLines(3);composer.addView(answerBox,new LinearLayout.LayoutParams(0,dp(58),1f));
-        voiceButton=button("🎤",21);voiceButton.setOnClickListener(v->toggleOfflineSpeech());composer.addView(voiceButton,new LinearLayout.LayoutParams(dp(58),dp(58)));
-        Button send=button("发送",13);send.setOnClickListener(v->sendAnswer());composer.addView(send,new LinearLayout.LayoutParams(dp(64),dp(58)));root.addView(composer,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,dp(72)));
+        Button more = button("⋮",24);
+        more.setOnClickListener(this::showMoreMenu);
+        top.addView(more,new LinearLayout.LayoutParams(dp(50),dp(46)));
+        root.addView(top,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,dp(54)));
+
+        materialPreview = new TextView(this);
+        materialPreview.setTextSize(13);
+        materialPreview.setTextColor(Color.rgb(71,84,103));
+        materialPreview.setBackgroundColor(Color.rgb(248,250,252));
+        materialPreview.setPadding(dp(14),dp(9),dp(14),dp(9));
+        materialPreview.setMaxLines(2);
+        materialPreview.setOnClickListener(v -> editMaterial());
+        root.addView(materialPreview);
+
+        LinearLayout quick = new LinearLayout(this);
+        quick.setPadding(dp(8),dp(6),dp(8),dp(6));
+        String[] n = {"听力分析","高频表达","出一道题"};
+        String[] t = {"listening","phrases","quiz"};
+        for (int x=0;x<n.length;x++) {
+            Button b = button(n[x],12);
+            final String task = t[x];
+            b.setOnClickListener(v -> runTask(task));
+            quick.addView(b,new LinearLayout.LayoutParams(0,dp(44),1f));
+        }
+        root.addView(quick,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,dp(56)));
+
+        resultView = new TextView(this);
+        resultView.setTextSize(16);
+        resultView.setTextColor(Color.rgb(17,24,39));
+        resultView.setTextIsSelectable(true);
+        resultView.setLineSpacing(0,1.18f);
+        resultView.setPadding(dp(16),dp(14),dp(16),dp(18));
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.addView(resultView,new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(scroll,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,0,1f));
+
+        LinearLayout composer = new LinearLayout(this);
+        composer.setGravity(Gravity.CENTER_VERTICAL);
+        composer.setPadding(dp(8),dp(6),dp(8),dp(8));
+        composer.setBackgroundColor(Color.rgb(247,248,250));
+
+        answerBox = new EditText(this);
+        answerBox.setHint("输入回答，或点麦克风说英语");
+        answerBox.setTextSize(15);
+        answerBox.setMaxLines(3);
+        composer.addView(answerBox,new LinearLayout.LayoutParams(0,dp(58),1f));
+
+        voiceButton = button("🎤",21);
+        voiceButton.setOnClickListener(v -> toggleSpeech());
+        composer.addView(voiceButton,new LinearLayout.LayoutParams(dp(58),dp(58)));
+
+        Button send = button("发送",13);
+        send.setOnClickListener(v -> sendAnswer());
+        composer.addView(send,new LinearLayout.LayoutParams(dp(64),dp(58)));
+        root.addView(composer,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,dp(72)));
+
         setContentView(root);
     }
 
-    private void showMoreMenu(View anchor){
-        PopupMenu m=new PopupMenu(this,anchor);m.getMenu().add("编辑素材");m.getMenu().add("工程现场迁移");m.getMenu().add("简单讲解");m.getMenu().add("语音识别设置（Whisper）");m.getMenu().add("AI设置");m.getMenu().add("复制AI结果");if(AppData.isHttp(currentUrl))m.getMenu().add("打开原网页");
-        m.setOnMenuItemClickListener(item->{String t=item.getTitle().toString();if("编辑素材".equals(t))editMaterial();else if("工程现场迁移".equals(t))runTask("engineering");else if("简单讲解".equals(t))runTask("explain");else if(t.startsWith("语音识别设置"))showSpeechSettings();else if("AI设置".equals(t))showAiSetup();else if("复制AI结果".equals(t))copy(resultView.getText().toString(),"AI结果");else if("打开原网页".equals(t)){try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(currentUrl)));}catch(Exception e){toast("无法打开原网页");}}return true;});m.show();
+    private void showMoreMenu(View anchor) {
+        PopupMenu m = new PopupMenu(this,anchor);
+        m.getMenu().add("编辑素材");
+        m.getMenu().add("工程现场迁移");
+        m.getMenu().add("简单讲解");
+        m.getMenu().add("语音识别设置");
+        m.getMenu().add("AI设置");
+        m.getMenu().add("复制AI结果");
+        if (AppData.isHttp(currentUrl)) m.getMenu().add("打开原网页");
+        m.setOnMenuItemClickListener(item -> {
+            String t=item.getTitle().toString();
+            if ("编辑素材".equals(t)) editMaterial();
+            else if ("工程现场迁移".equals(t)) runTask("engineering");
+            else if ("简单讲解".equals(t)) runTask("explain");
+            else if ("语音识别设置".equals(t)) showSpeechSettings();
+            else if ("AI设置".equals(t)) showAiSetup();
+            else if ("复制AI结果".equals(t)) copy(resultView.getText().toString(),"AI结果");
+            else if ("打开原网页".equals(t)) {
+                try { startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(currentUrl))); }
+                catch(Exception e) { toast("无法打开原网页"); }
+            }
+            return true;
+        });
+        m.show();
     }
 
-    private void toggleOfflineSpeech(){
-        if(whisper.isRecording()){
-            voiceButton.setText("…");
-            whisper.stopAndTranscribe(new OfflineWhisperManager.Callback(){
-                @Override public void onStatus(String msg){resultView.setText(msg);}
-                @Override public void onResult(String text){voiceButton.setText("🎤");answerBox.setText(text);answerBox.setSelection(answerBox.length());if(keyStore.hasKey()&&!currentMaterial.trim().isEmpty()){answerBox.setText("");askFollowUp(text);}else resultView.setText("识别结果：\n"+text);}
-                @Override public void onError(String msg){voiceButton.setText("🎤");resultView.setText(msg);}
-            });
+    private String selectedSpeechProvider() {
+        return speechPrefs.getString(KEY_SPEECH_PROVIDER, PROVIDER_GEMINI);
+    }
+
+    private void setSpeechProvider(String provider) {
+        speechPrefs.edit().putString(KEY_SPEECH_PROVIDER, provider).apply();
+    }
+
+    private void toggleSpeech() {
+        if (voiceRecorder.isRecording()) {
+            stopGeminiRecording();
             return;
         }
-        if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},MIC_PERMISSION);return;}
-        if(!whisper.hasModel()){showSpeechSettings();return;}
-        voiceButton.setText("■");
-        whisper.startRecording(new OfflineWhisperManager.Callback(){
-            @Override public void onStatus(String msg){resultView.setText(msg);}
-            @Override public void onResult(String text){}
-            @Override public void onError(String msg){voiceButton.setText("🎤");resultView.setText(msg);}
+        if (whisper.isRecording()) {
+            stopWhisperRecording();
+            return;
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},MIC_PERMISSION);
+            return;
+        }
+        if (PROVIDER_WHISPER.equals(selectedSpeechProvider())) startWhisperRecording();
+        else startGeminiRecording();
+    }
+
+    private void startGeminiRecording() {
+        if (!keyStore.hasKey()) {
+            toast("Gemini语音识别使用同一个AI Key，先配置一次即可");
+            showAiSetup();
+            return;
+        }
+        try {
+            voiceRecorder.start();
+            voiceButton.setText("■");
+            resultView.setText("正在录音…\n再点一次麦克风结束，然后用 Gemini 3.5 Transcribe 识别。 ");
+        } catch (Exception e) {
+            voiceButton.setText("🎤");
+            resultView.setText("录音启动失败：" + (e.getMessage()==null?e.getClass().getSimpleName():e.getMessage()));
+        }
+    }
+
+    private void stopGeminiRecording() {
+        voiceButton.setText("…");
+        final File audio;
+        try {
+            audio = voiceRecorder.stop();
+        } catch (Exception e) {
+            voiceButton.setText("🎤");
+            resultView.setText("录音失败：" + (e.getMessage()==null?e.getClass().getSimpleName():e.getMessage()));
+            return;
+        }
+        resultView.setText("Gemini 3.5 Transcribe 正在识别…");
+        transcriptionClient.transcribe(audio,currentMaterial,new GeminiTranscriptionClient.Callback() {
+            @Override public void onSuccess(String text) {
+                voiceButton.setText("🎤");
+                handleRecognizedText(text);
+            }
+            @Override public void onError(String message) {
+                voiceButton.setText("🎤");
+                resultView.setText(message + "\n\n可在右上角 ⋮ → 语音识别设置，切换到离线 Whisper 备用。 ");
+            }
         });
     }
 
-    private void showSpeechSettings(){
-        String[] choices={"Base English · 较快 · 约148MB","Small English · 更准 · 约488MB"};
-        int checked=OfflineWhisperManager.MODEL_SMALL.equals(whisper.selectedModel())?1:0;
-        new AlertDialog.Builder(this).setTitle("离线语音识别 · Whisper")
-                .setSingleChoiceItems(choices,checked,(d,w)->whisper.setSelectedModel(w==1?OfflineWhisperManager.MODEL_SMALL:OfflineWhisperManager.MODEL_BASE))
-                .setMessage("当前："+whisper.selectedModelLabel()+"\n状态："+whisper.downloadStatus()+"\n\n录音和识别都在手机本地完成，不再调用 Google 语音识别。")
-                .setPositiveButton("下载/更新所选模型",(d,w)->{long id=whisper.downloadModel(whisper.selectedModel());toast("模型开始下载，完成后即可离线识别。任务 #"+id);})
-                .setNeutralButton("检查状态",(d,w)->toast(whisper.selectedModelLabel()+"："+whisper.downloadStatus()))
-                .setNegativeButton("关闭",null).show();
+    private void startWhisperRecording() {
+        if (!whisper.hasModel()) {
+            showWhisperSettings();
+            return;
+        }
+        voiceButton.setText("■");
+        whisper.startRecording(new OfflineWhisperManager.Callback() {
+            @Override public void onStatus(String msg) { resultView.setText(msg); }
+            @Override public void onResult(String text) {}
+            @Override public void onError(String msg) { voiceButton.setText("🎤"); resultView.setText(msg); }
+        });
     }
 
-    private void runTask(String task){if(!ensureReady())return;data.markPractice();String instruction;
-        switch(task){case"phrases":instruction="从素材中只挑5个真正值得听懂和开口用的高频表达。每个写：英文表达：大白话中文意思；这段里什么意思；一个自然短例句。不要凑数。";break;case"engineering":instruction="从素材挑3到5个能迁移到新加坡办公室装修/建筑现场的表达。给原表达、现场自然说法、中文意思和短例句。不要硬迁移。";break;case"quiz":instruction="根据素材只出一道适合初级到中级学习者的听力理解或复述题。只出题，不给答案，用简单英语。";break;case"explain":instruction="用简单中文讲明白这段英语：先一句话说核心意思，再解释最难懂的3个地方。不要长篇语法课。";break;default:instruction="把素材当真实听力材料分析：1核心意思；2最容易听不出来的3到5个短语；3真实语速可能出现的连读、弱读、吞音；4给一个很短的复述任务。中文直白。";}
-        resultView.setText("AI 正在处理…");client.ask(base()+"\n\n任务："+instruction+"\n\n【素材】\n"+currentMaterial,new GeminiClient.Callback(){@Override public void onSuccess(String text){lastAiReply=text;resultView.setText(text);}@Override public void onError(String message){resultView.setText("AI暂时不可用：\n"+message);}});
+    private void stopWhisperRecording() {
+        voiceButton.setText("…");
+        whisper.stopAndTranscribe(new OfflineWhisperManager.Callback() {
+            @Override public void onStatus(String msg) { resultView.setText(msg); }
+            @Override public void onResult(String text) { voiceButton.setText("🎤"); handleRecognizedText(text); }
+            @Override public void onError(String msg) {
+                voiceButton.setText("🎤");
+                resultView.setText(msg + "\n\n这台手机的 Whisper 本地库兼容性可能有问题。建议右上角切回 Gemini 3.5 Transcribe。 ");
+            }
+        });
     }
 
-    private void sendAnswer(){String u=answerBox.getText().toString().trim();if(u.isEmpty()){toast("先输入或说一句英语");return;}if(!ensureReady())return;answerBox.setText("");askFollowUp(u);}
-    private void askFollowUp(String user){data.markPractice();resultView.setText("AI 正在检查…");String p=base()+"\n\n【素材】\n"+currentMaterial+"\n\n【AI上一条回复】\n"+trim(lastAiReply,4500)+"\n\n【我的回答】\n"+user+"\n\n直接评价我的回答。先指出最影响理解的1到3个问题，再给一个我容易说出口的自然版本。如果上一条是题目，评价后再出下一题；否则继续围绕素材练。不要一次讲太多。";client.ask(p,new GeminiClient.Callback(){@Override public void onSuccess(String text){lastAiReply=text;resultView.setText(text);}@Override public void onError(String m){resultView.setText("AI暂时不可用：\n"+m);}});}
+    private void handleRecognizedText(String text) {
+        answerBox.setText(text);
+        answerBox.setSelection(answerBox.length());
+        if (keyStore.hasKey() && !currentMaterial.trim().isEmpty()) {
+            answerBox.setText("");
+            askFollowUp(text);
+        } else {
+            resultView.setText("识别结果：\n" + text);
+        }
+    }
 
-    private boolean ensureReady(){if(currentMaterial.trim().isEmpty()){toast("先准备英文素材");editMaterial();return false;}if(!keyStore.hasKey()){showAiSetup();return false;}return true;}
-    private String base(){return"你是英语听力和口语教练。重点帮助用户听懂真实口语并能在日常工作和建筑/装修现场说出来。回答短、具体、能马上练，不堆术语。";}
+    private void showSpeechSettings() {
+        String[] choices = {
+                "Gemini 3.5 Transcribe · 在线 · 推荐",
+                "Whisper 离线 · 备用"
+        };
+        int checked = PROVIDER_WHISPER.equals(selectedSpeechProvider()) ? 1 : 0;
+        AlertDialog d = new AlertDialog.Builder(this)
+                .setTitle("语音识别")
+                .setSingleChoiceItems(choices,checked,(dialog,which) -> {
+                    setSpeechProvider(which==1 ? PROVIDER_WHISPER : PROVIDER_GEMINI);
+                })
+                .setMessage("Gemini：复用现有 Gemini Key，无需下载模型；当前官方免费层可用于语音转写。\n\nWhisper：完全离线，但部分安卓设备可能出现模型初始化兼容问题。")
+                .setPositiveButton("确定",null)
+                .setNeutralButton("Whisper模型管理",(dialog,which) -> showWhisperSettings())
+                .create();
+        d.show();
+    }
 
-    private void renderMaterialPreview(){String b=currentMaterial.trim().replaceAll("\\s+"," ");materialPreview.setText(b.isEmpty()?"素材：未载入（点这里编辑）":"素材："+currentTitle+"\n"+AppData.ellipsize(b,120));}
-    private void editMaterial(){EditText e=new EditText(this);e.setGravity(Gravity.TOP);e.setMinLines(8);e.setMaxLines(16);e.setText(currentMaterial);e.setHint("粘贴或修改英文素材");new AlertDialog.Builder(this).setTitle("编辑素材").setView(e).setPositiveButton("保存",(d,w)->{currentMaterial=e.getText().toString().trim();renderMaterialPreview();}).setNegativeButton("取消",null).show();}
+    private void showWhisperSettings() {
+        String[] choices = {"Base English · 较快 · 约148MB","Small English · 更准 · 约488MB"};
+        int checked = OfflineWhisperManager.MODEL_SMALL.equals(whisper.selectedModel()) ? 1 : 0;
+        new AlertDialog.Builder(this)
+                .setTitle("Whisper 离线备用")
+                .setSingleChoiceItems(choices,checked,(d,w) -> whisper.setSelectedModel(w==1?OfflineWhisperManager.MODEL_SMALL:OfflineWhisperManager.MODEL_BASE))
+                .setMessage("当前："+whisper.selectedModelLabel()+"\n状态："+whisper.downloadStatus()+"\n\n如果出现 Failed to initialise model，建议直接切回 Gemini，不必反复下载。")
+                .setPositiveButton("下载/更新模型",(d,w) -> {
+                    long id=whisper.downloadModel(whisper.selectedModel());
+                    toast("模型开始下载，任务 #"+id);
+                })
+                .setNeutralButton("检查状态",(d,w) -> toast(whisper.selectedModelLabel()+"："+whisper.downloadStatus()))
+                .setNegativeButton("关闭",null)
+                .show();
+    }
 
-    private void showAiSetup(){LinearLayout box=new LinearLayout(this);box.setOrientation(LinearLayout.VERTICAL);box.setPadding(dp(18),0,dp(18),0);TextView info=new TextView(this);info.setText("在线 AI 使用 Gemini 免费层。只需设置一次 Key。普通英语学习素材即可，不要发送公司机密。 ");box.addView(info);EditText key=new EditText(this);key.setSingleLine(true);key.setHint(keyStore.hasKey()?"已配置；粘贴新Key可替换":"粘贴 Gemini API Key");box.addView(key,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,dp(52)));AlertDialog d=new AlertDialog.Builder(this).setTitle("AI设置").setView(box).setPositiveButton("保存并测试",null).setNeutralButton("获取免费Key",null).setNegativeButton("取消",null).create();d.setOnShowListener(x->{d.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v->{try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse("https://aistudio.google.com/apikey")));}catch(Exception e){toast("无法打开Google AI Studio");}});d.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{String k=key.getText().toString().trim();if(!k.isEmpty())try{keyStore.save(k);}catch(Exception e){toast("保存失败");return;}if(!keyStore.hasKey()){toast("请先粘贴API Key");return;}d.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);client.ask("Reply with exactly: OK",new GeminiClient.Callback(){@Override public void onSuccess(String text){toast("AI连接成功");d.dismiss();}@Override public void onError(String m){d.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);toast(m);}});});});d.show();}
+    private void runTask(String task) {
+        if (!ensureReady()) return;
+        data.markPractice();
+        String instruction;
+        switch(task) {
+            case "phrases": instruction="从素材中只挑5个真正值得听懂和开口用的高频表达。每个写：英文表达：大白话中文意思；这段里什么意思；一个自然短例句。不要凑数。"; break;
+            case "engineering": instruction="从素材挑3到5个能迁移到新加坡办公室装修/建筑现场的表达。给原表达、现场自然说法、中文意思和短例句。不要硬迁移。"; break;
+            case "quiz": instruction="根据素材只出一道适合初级到中级学习者的听力理解或复述题。只出题，不给答案，用简单英语。"; break;
+            case "explain": instruction="用简单中文讲明白这段英语：先一句话说核心意思，再解释最难懂的3个地方。不要长篇语法课。"; break;
+            default: instruction="把素材当真实听力材料分析：1核心意思；2最容易听不出来的3到5个短语；3真实语速可能出现的连读、弱读、吞音；4给一个很短的复述任务。中文直白。";
+        }
+        resultView.setText("AI 正在处理…");
+        client.ask(base()+"\n\n任务："+instruction+"\n\n【素材】\n"+currentMaterial,new GeminiClient.Callback() {
+            @Override public void onSuccess(String text) { lastAiReply=text; resultView.setText(text); }
+            @Override public void onError(String message) { resultView.setText("AI暂时不可用：\n"+message); }
+        });
+    }
 
-    @Override public void onRequestPermissionsResult(int r,String[] p,int[] g){super.onRequestPermissionsResult(r,p,g);if(r==MIC_PERMISSION&&g.length>0&&g[0]==PackageManager.PERMISSION_GRANTED)toggleOfflineSpeech();else if(r==MIC_PERMISSION)toast("需要麦克风权限才能语音练习");}
-    @Override protected void onDestroy(){if(whisper!=null)whisper.destroy();if(client!=null)client.shutdown();super.onDestroy();}
+    private void sendAnswer() {
+        String u=answerBox.getText().toString().trim();
+        if (u.isEmpty()) { toast("先输入或说一句英语"); return; }
+        if (!ensureReady()) return;
+        answerBox.setText("");
+        askFollowUp(u);
+    }
 
-    private String safe(String s){return s==null?"":s;}private String trim(String s,int m){if(s==null)return"";return s.length()<=m?s:s.substring(s.length()-m);}private Button button(String t,int s){Button b=new Button(this);b.setText(t);b.setTextSize(s);b.setAllCaps(false);b.setMinWidth(0);b.setMinHeight(0);return b;}private int dp(int v){return Math.round(v*getResources().getDisplayMetrics().density);}private void toast(String s){Toast.makeText(this,s,Toast.LENGTH_LONG).show();}private void copy(String s,String l){ClipboardManager cm=(ClipboardManager)getSystemService(Context.CLIPBOARD_SERVICE);cm.setPrimaryClip(ClipData.newPlainText(l,s==null?"":s));toast("已复制");}
+    private void askFollowUp(String user) {
+        data.markPractice();
+        resultView.setText("AI 正在检查…");
+        String p=base()+"\n\n【素材】\n"+currentMaterial+"\n\n【AI上一条回复】\n"+trim(lastAiReply,4500)+"\n\n【我的回答】\n"+user+"\n\n直接评价我的回答。先指出最影响理解的1到3个问题，再给一个我容易说出口的自然版本。如果上一条是题目，评价后再出下一题；否则继续围绕素材练。不要一次讲太多。";
+        client.ask(p,new GeminiClient.Callback() {
+            @Override public void onSuccess(String text) { lastAiReply=text; resultView.setText(text); }
+            @Override public void onError(String m) { resultView.setText("AI暂时不可用：\n"+m); }
+        });
+    }
+
+    private boolean ensureReady() {
+        if (currentMaterial.trim().isEmpty()) { toast("先准备英文素材"); editMaterial(); return false; }
+        if (!keyStore.hasKey()) { showAiSetup(); return false; }
+        return true;
+    }
+
+    private String base() {
+        return "你是英语听力和口语教练。重点帮助用户听懂真实口语并能在日常工作和建筑/装修现场说出来。回答短、具体、能马上练，不堆术语。";
+    }
+
+    private void renderMaterialPreview() {
+        String b=currentMaterial.trim().replaceAll("\\s+"," ");
+        materialPreview.setText(b.isEmpty()?"素材：未载入（点这里编辑）":"素材："+currentTitle+"\n"+AppData.ellipsize(b,120));
+    }
+
+    private void editMaterial() {
+        EditText e=new EditText(this);
+        e.setGravity(Gravity.TOP);
+        e.setMinLines(8);
+        e.setMaxLines(16);
+        e.setText(currentMaterial);
+        e.setHint("粘贴或修改英文素材");
+        new AlertDialog.Builder(this).setTitle("编辑素材").setView(e)
+                .setPositiveButton("保存",(d,w) -> { currentMaterial=e.getText().toString().trim(); renderMaterialPreview(); })
+                .setNegativeButton("取消",null).show();
+    }
+
+    private void showAiSetup() {
+        LinearLayout box=new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(18),0,dp(18),0);
+        TextView info=new TextView(this);
+        info.setText("AI老师和 Gemini 语音识别共用这一个 Key，只需设置一次。普通英语学习素材即可，不要发送公司机密。 ");
+        box.addView(info);
+        EditText key=new EditText(this);
+        key.setSingleLine(true);
+        key.setHint(keyStore.hasKey()?"已配置；粘贴新Key可替换":"粘贴 Gemini API Key");
+        box.addView(key,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,dp(52)));
+
+        AlertDialog d=new AlertDialog.Builder(this).setTitle("AI设置").setView(box)
+                .setPositiveButton("保存并测试",null)
+                .setNeutralButton("获取免费Key",null)
+                .setNegativeButton("取消",null).create();
+        d.setOnShowListener(x -> {
+            d.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+                try { startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse("https://aistudio.google.com/apikey"))); }
+                catch(Exception e) { toast("无法打开Google AI Studio"); }
+            });
+            d.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+                String k=key.getText().toString().trim();
+                if (!k.isEmpty()) {
+                    try { keyStore.save(k); }
+                    catch(Exception e) { toast("保存失败"); return; }
+                }
+                if (!keyStore.hasKey()) { toast("请先粘贴API Key"); return; }
+                d.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
+                client.ask("Reply with exactly: OK",new GeminiClient.Callback() {
+                    @Override public void onSuccess(String text) { toast("AI连接成功"); d.dismiss(); }
+                    @Override public void onError(String m) { d.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true); toast(m); }
+                });
+            });
+        });
+        d.show();
+    }
+
+    @Override public void onRequestPermissionsResult(int r,String[] p,int[] g) {
+        super.onRequestPermissionsResult(r,p,g);
+        if (r==MIC_PERMISSION && g.length>0 && g[0]==PackageManager.PERMISSION_GRANTED) toggleSpeech();
+        else if (r==MIC_PERMISSION) toast("需要麦克风权限才能语音练习");
+    }
+
+    @Override protected void onDestroy() {
+        if (voiceRecorder!=null) voiceRecorder.cancel();
+        if (whisper!=null) whisper.destroy();
+        if (client!=null) client.shutdown();
+        if (transcriptionClient!=null) transcriptionClient.shutdown();
+        super.onDestroy();
+    }
+
+    private String safe(String s) { return s==null?"":s; }
+    private String trim(String s,int m) { if(s==null)return""; return s.length()<=m?s:s.substring(s.length()-m); }
+    private Button button(String t,int s) { Button b=new Button(this); b.setText(t); b.setTextSize(s); b.setAllCaps(false); b.setMinWidth(0); b.setMinHeight(0); return b; }
+    private int dp(int v) { return Math.round(v*getResources().getDisplayMetrics().density); }
+    private void toast(String s) { Toast.makeText(this,s,Toast.LENGTH_LONG).show(); }
+    private void copy(String s,String l) { ClipboardManager cm=(ClipboardManager)getSystemService(Context.CLIPBOARD_SERVICE); cm.setPrimaryClip(ClipData.newPlainText(l,s==null?"":s)); toast("已复制"); }
 }
