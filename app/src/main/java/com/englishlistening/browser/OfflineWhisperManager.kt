@@ -49,12 +49,14 @@ class OfflineWhisperManager(private val activity: Activity) {
     fun selectedModelLabel(): String = if (selectedModel() == MODEL_SMALL) "Whisper Small English · 高精度 · 约488MB" else "Whisper Base English · 较快 · 约148MB"
     fun setSelectedModel(model: String) { prefs.edit().putString(KEY_MODEL, if (model == MODEL_SMALL) MODEL_SMALL else MODEL_BASE).apply() }
 
+    @JvmOverloads
     fun modelFile(model: String = selectedModel()): File {
         val dir = activity.getExternalFilesDir("models") ?: File(activity.filesDir, "models")
         if (!dir.exists()) dir.mkdirs()
         return File(dir, if (model == MODEL_SMALL) "ggml-small.en.bin" else "ggml-base.en.bin")
     }
 
+    @JvmOverloads
     fun hasModel(model: String = selectedModel()): Boolean {
         val f = modelFile(model)
         val minBytes = if (model == MODEL_SMALL) 400L * 1024 * 1024 else 120L * 1024 * 1024
