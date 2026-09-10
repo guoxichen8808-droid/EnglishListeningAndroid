@@ -39,25 +39,15 @@ class OfflineWhisperManager(private val activity: Activity) {
 
     private val prefs = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
     @Volatile private var recording = false
     private var recorder: AudioRecord? = null
     private var recordThread: Thread? = null
     private var rawFile: File? = null
 
     fun isRecording(): Boolean = recording
-
-    fun selectedModel(): String = prefs.getString(KEY_MODEL, MODEL_BASE) ?: MODEL_BASE
-
-    fun selectedModelLabel(): String = if (selectedModel() == MODEL_SMALL) {
-        "Whisper Small English · 高精度 · 约488MB"
-    } else {
-        "Whisper Base English · 推荐 · 约148MB"
-    }
-
-    fun setSelectedModel(model: String) {
-        prefs.edit().putString(KEY_MODEL, if (model == MODEL_SMALL) MODEL_SMALL else MODEL_BASE).apply()
-    }
+    fun selectedModel(): String = prefs.getString(KEY_MODEL, MODEL_SMALL) ?: MODEL_SMALL
+    fun selectedModelLabel(): String = if (selectedModel() == MODEL_SMALL) "Whisper Small English · 高精度 · 约488MB" else "Whisper Base English · 较快 · 约148MB"
+    fun setSelectedModel(model: String) { prefs.edit().putString(KEY_MODEL, if (model == MODEL_SMALL) MODEL_SMALL else MODEL_BASE).apply() }
 
     fun modelFile(model: String = selectedModel()): File {
         val dir = activity.getExternalFilesDir("models") ?: File(activity.filesDir, "models")
@@ -76,11 +66,7 @@ class OfflineWhisperManager(private val activity: Activity) {
         setSelectedModel(normalized)
         val file = modelFile(normalized)
         if (file.exists()) file.delete()
-        val url = if (normalized == MODEL_SMALL) {
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin"
-        } else {
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
-        }
+        val url = if (normalized == MODEL_SMALL) "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin" else "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
         val request = DownloadManager.Request(Uri.parse(url))
             .setTitle(if (normalized == MODEL_SMALL) "Whisper Small English" else "Whisper Base English")
             .setDescription("英语听力 APP 离线语音识别模型")
@@ -112,60 +98,25 @@ class OfflineWhisperManager(private val activity: Activity) {
                     }
                 } else "未安装"
             }
-        } catch (_: Exception) {
-            "未安装"
-        }
+        } catch (_: Exception) { "未安装" }
     }
 
     fun startRecording(callback: Callback) {
         if (recording) return
-        if (!hasModel()) {
-            callback.onError("离线 Whisper 模型还没有安装")
-            return
-        }
+        if (!hasModel()) { callback.onError("离线 Whisper 模型还没有安装"); return }
         try {
-            val minBuffer = AudioRecord.getMinBufferSize(
-                SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT
-            )
+            val minBuffer = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
             val bufferSize = maxOf(minBuffer, 4096)
-            val audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                bufferSize * 2
-            )
-            if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
-                audioRecord.release()
-                callback.onError("麦克风初始化失败")
-                return
-            }
-            val dir = activity.cacheDir
-            val raw = File(dir, "whisper_record_${System.currentTimeMillis()}.pcm")
-            rawFile = raw
-            recorder = audioRecord
-            recording = true
-            audioRecord.startRecording()
+            val audioRecord = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize * 2)
+            if (audioRecord.state != AudioRecord.STATE_INITIALIZED) { audioRecord.release(); callback.onError("麦克风初始化失败"); return }
+            val raw = File(activity.cacheDir, "whisper_record_${System.currentTimeMillis()}.pcm")
+            rawFile = raw; recorder = audioRecord; recording = true; audioRecord.startRecording()
             recordThread = Thread {
-                try {
-                    FileOutputStream(raw).use { out ->
-                        val buffer = ByteArray(bufferSize)
-                        while (recording) {
-                            val n = audioRecord.read(buffer, 0, buffer.size)
-                            if (n > 0) out.write(buffer, 0, n)
-                        }
-                    }
-                } catch (_: Exception) {
-                }
+                try { FileOutputStream(raw).use { out -> val buffer = ByteArray(bufferSize); while (recording) { val n = audioRecord.read(buffer,0,buffer.size); if(n>0) out.write(buffer,0,n) } } } catch (_: Exception) {}
             }.also { it.start() }
             callback.onStatus("正在录音… 再点一次麦克风结束并识别")
-        } catch (e: SecurityException) {
-            callback.onError("没有麦克风权限")
-        } catch (e: Exception) {
-            callback.onError("录音启动失败：${e.message ?: e.javaClass.simpleName}")
-        }
+        } catch (e: SecurityException) { callback.onError("没有麦克风权限") }
+        catch (e: Exception) { callback.onError("录音启动失败：${e.message ?: e.javaClass.simpleName}") }
     }
 
     fun stopAndTranscribe(callback: Callback) {
@@ -176,71 +127,28 @@ class OfflineWhisperManager(private val activity: Activity) {
         scope.launch {
             try {
                 try { recordThread?.join(2500) } catch (_: Exception) {}
-                recorder?.release()
-                recorder = null
-                recordThread = null
+                recorder?.release(); recorder = null; recordThread = null
                 val raw = rawFile ?: throw IllegalStateException("录音文件不存在")
                 if (!raw.exists() || raw.length() < 3200) throw IllegalStateException("录音太短，请重新说")
                 val wav = File(activity.cacheDir, "whisper_${System.currentTimeMillis()}.wav")
-                pcmToWav(raw, wav)
-                raw.delete()
-                rawFile = null
-
-                val modelPath = modelFile().absolutePath
-                val model = Whisper.loadModel(activity, modelPath)
+                pcmToWav(raw,wav); raw.delete(); rawFile = null
+                val model = Whisper.loadModel(activity, modelFile().absolutePath)
                 try {
                     val result = Whisper.transcribe(model, wav.absolutePath, WhisperConfig(language = "en"))
                     val text = result.text.trim()
-                    withContext(Dispatchers.Main) {
-                        if (text.isEmpty()) callback.onError("没有识别到清晰英语，请再说一次")
-                        else callback.onResult(text)
-                    }
-                } finally {
-                    Whisper.releaseModel(model)
-                    wav.delete()
-                }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    callback.onError("Whisper 识别失败：${e.message ?: e.javaClass.simpleName}")
-                }
-            }
+                    withContext(Dispatchers.Main) { if(text.isEmpty()) callback.onError("没有识别到清晰英语，请再说一次") else callback.onResult(text) }
+                } finally { Whisper.releaseModel(model); wav.delete() }
+            } catch (e: Exception) { withContext(Dispatchers.Main) { callback.onError("Whisper 识别失败：${e.message ?: e.javaClass.simpleName}") } }
         }
     }
 
     private fun pcmToWav(raw: File, wav: File) {
-        val dataSize = raw.length()
-        FileOutputStream(wav).use { out ->
-            val header = ByteArray(44)
-            val byteRate = SAMPLE_RATE * 2
-            val totalDataLen = dataSize + 36
-            ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN).apply {
-                put("RIFF".toByteArray(Charsets.US_ASCII))
-                putInt(totalDataLen.toInt())
-                put("WAVE".toByteArray(Charsets.US_ASCII))
-                put("fmt ".toByteArray(Charsets.US_ASCII))
-                putInt(16)
-                putShort(1.toShort())
-                putShort(1.toShort())
-                putInt(SAMPLE_RATE)
-                putInt(byteRate)
-                putShort(2.toShort())
-                putShort(16.toShort())
-                put("data".toByteArray(Charsets.US_ASCII))
-                putInt(dataSize.toInt())
-            }
-            out.write(header)
-            FileInputStream(raw).use { input -> input.copyTo(out) }
+        val dataSize = raw.length(); FileOutputStream(wav).use { out ->
+            val header=ByteArray(44); val byteRate=SAMPLE_RATE*2; val totalDataLen=dataSize+36
+            ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN).apply { put("RIFF".toByteArray(Charsets.US_ASCII)); putInt(totalDataLen.toInt()); put("WAVE".toByteArray(Charsets.US_ASCII)); put("fmt ".toByteArray(Charsets.US_ASCII)); putInt(16); putShort(1.toShort()); putShort(1.toShort()); putInt(SAMPLE_RATE); putInt(byteRate); putShort(2.toShort()); putShort(16.toShort()); put("data".toByteArray(Charsets.US_ASCII)); putInt(dataSize.toInt()) }
+            out.write(header); FileInputStream(raw).use { input -> input.copyTo(out) }
         }
     }
 
-    fun destroy() {
-        recording = false
-        try { recorder?.stop() } catch (_: Exception) {}
-        try { recorder?.release() } catch (_: Exception) {}
-        recorder = null
-        recordThread = null
-        rawFile?.delete()
-        rawFile = null
-        scope.cancel()
-    }
+    fun destroy() { recording=false; try{recorder?.stop()}catch(_:Exception){}; try{recorder?.release()}catch(_:Exception){}; recorder=null; recordThread=null; rawFile?.delete(); rawFile=null; scope.cancel() }
 }
